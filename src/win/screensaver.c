@@ -10,11 +10,6 @@
 
 // 渲染参数（可由 /c 配置窗口写入 config.json 覆盖，见 config_load）
 static int g_cell = 10;          // 单元格边长（px）
-static double g_blinkPeriod = 5.0; // 全屏呼吸灯周期（秒）
-// 全屏呼吸灯的内存 DC（跨帧复用，避免每帧分配全屏位图）
-static HDC s_breathDc = NULL;
-static HBITMAP s_breathBmp = NULL;
-static int s_breathW = 0, s_breathH = 0;
 
 // tcc 自带头文件较老，缺少的宏/函数在此补齐
 #ifndef GET_X_LPARAM
@@ -141,7 +136,6 @@ static void record_stats_if_ended(void) {
 // ---- 用户配置（%APPDATA%\snake-screensaver\config.json，由 /c 设置窗口读写）----
 typedef struct {
   int cellSizePx;        // 单元格边长（px）
-  double blinkPeriodSec; // 全屏呼吸灯周期（秒）
   double baseSpeed;      // 基础速度（格/秒）
   int initialBlockCap;   // 初始同屏方块数上限
   int blockLifetime;     // 方块初始生存秒数
@@ -157,7 +151,6 @@ static char g_cfgPath[MAX_PATH];
 static void config_default(void) {
   Params p = params_default();
   g_cfg.cellSizePx = 10;
-  g_cfg.blinkPeriodSec = 5.0;
   g_cfg.baseSpeed = p.baseSpeed;
   g_cfg.initialBlockCap = p.initialBlockCap;
   g_cfg.blockLifetime = p.blockLifetime;
@@ -218,7 +211,6 @@ static void config_load(void) {
     fclose(f);
     const char *v;
     if ((v = find_val(buf, "cellSizePx")) && atoi(v) >= 4 && atoi(v) <= 64) g_cfg.cellSizePx = atoi(v);
-    if ((v = find_val(buf, "blinkPeriodSec")) && strtod(v, NULL) >= 0.5) g_cfg.blinkPeriodSec = strtod(v, NULL);
     if ((v = find_val(buf, "baseSpeed")) && strtod(v, NULL) > 0) g_cfg.baseSpeed = strtod(v, NULL);
     if ((v = find_val(buf, "initialBlockCap")) && atoi(v) >= 1) g_cfg.initialBlockCap = atoi(v);
     if ((v = find_val(buf, "blockLifetime")) && atoi(v) >= 1) g_cfg.blockLifetime = atoi(v);
@@ -229,7 +221,6 @@ static void config_load(void) {
     if ((v = find_val(buf, "weights"))) parse_weights(v, g_cfg.weights);
   }
   g_cell = g_cfg.cellSizePx;
-  g_blinkPeriod = g_cfg.blinkPeriodSec;
 }
 
 static void config_save(void) {
@@ -240,7 +231,6 @@ static void config_save(void) {
   if (!f) return;
   fprintf(f, "{\n");
   fprintf(f, "  \"cellSizePx\": %d,\n", g_cfg.cellSizePx);
-  fprintf(f, "  \"blinkPeriodSec\": %g,\n", g_cfg.blinkPeriodSec);
   fprintf(f, "  \"baseSpeed\": %g,\n", g_cfg.baseSpeed);
   fprintf(f, "  \"initialBlockCap\": %d,\n", g_cfg.initialBlockCap);
   fprintf(f, "  \"blockLifetime\": %d,\n", g_cfg.blockLifetime);
@@ -283,7 +273,7 @@ static void draw_game(HDC dc, int w, int h, double nowMs) {
   SelectObject(dc, oldPen);
   DeleteObject(pen);
 
-  // 方块（实色，不再闪烁；全屏呼吸灯见 draw_breathing）
+  // 方块（实色，无任何闪烁/呼吸效果）
   for (int i = 0; i < g_game.blockCount; i++) {
     Block *b = &g_game.blocks[i];
     HBRUSH br = CreateSolidBrush(COLORS[b->kind - 1]);
@@ -300,26 +290,6 @@ static void draw_game(HDC dc, int w, int h, double nowMs) {
     FillRect(dc, &rr, br);
     DeleteObject(br);
   }
-}
-
-// 全屏呼吸灯：整屏叠加随 sin 变化的黑色半透明层（最深约 40% 变暗），周期 g_blinkPeriod
-static void draw_breathing(HDC dc, int w, int h, double nowMs) {
-  if (!alpha_ready() || w <= 0 || h <= 0) return;
-  if (!s_breathDc || s_breathW != w || s_breathH != h) {
-    if (s_breathBmp) DeleteObject(s_breathBmp);
-    if (s_breathDc) DeleteDC(s_breathDc);
-    s_breathDc = CreateCompatibleDC(dc);
-    s_breathBmp = CreateCompatibleBitmap(dc, w, h);
-    if (s_breathDc) SelectObject(s_breathDc, s_breathBmp);
-    s_breathW = w; s_breathH = h;
-  }
-  double f = 0.5 + 0.5 * sin(2 * 3.14159265358979 * nowMs / 1000.0 / g_blinkPeriod);
-  HBRUSH br = CreateSolidBrush(RGB(0, 0, 0));
-  RECT all = {0, 0, w, h};
-  FillRect(s_breathDc, &all, br);
-  DeleteObject(br);
-  BLENDFUNCTION bf = { AC_SRC_OVER, 0, (BYTE)(f * 100), 0 }; // 0..100 → 0%~40% 变暗
-  s_alphaBlend(dc, 0, 0, w, h, s_breathDc, 0, 0, w, h, bf);
 }
 
 static void draw_hud(HDC dc, int w) {
@@ -414,7 +384,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       GetClientRect(hwnd, &rc);
       draw_game(dc, rc.right, rc.bottom, NOW_MS);
       draw_hud(dc, rc.right);
-      draw_breathing(dc, rc.right, rc.bottom, NOW_MS);
       EndPaint(hwnd, &ps);
       return 0;
     }
@@ -431,7 +400,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   return DefWindowProc(hwnd, msg, wp, lp);
 }
 
-// ---- 配置窗口（/c，设置窗口：可调参数 + 方块占比 + 呼吸周期）----
+// ---- 配置窗口（/c，设置窗口：可调参数 + 方块占比）----
 // 控件 ID
 #define IDC_OK 1
 #define IDC_CANCEL 2
@@ -442,7 +411,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 #define IDC_URG_T 104
 #define IDC_URG_F 105
 #define IDC_FREEZE 106
-#define IDC_BLINK 107
 #define IDC_CELL 108
 #define IDC_W1 110 // 占比 1..7 依次 +i
 
@@ -488,8 +456,6 @@ static void cfg_apply(HWND hwnd) {
   if (v >= 0) g_cfg.urgencyFactor = v;
   v = cfg_double(hwnd, IDC_FREEZE, g_cfg.endFreezeMs);
   if (v >= 0) g_cfg.endFreezeMs = v;
-  v = cfg_double(hwnd, IDC_BLINK, g_cfg.blinkPeriodSec);
-  if (v >= 0.5) g_cfg.blinkPeriodSec = v;
   v = cfg_int(hwnd, IDC_CELL, g_cfg.cellSizePx);
   if (v >= 4 && v <= 64) g_cfg.cellSizePx = (int)v;
   int sum = 0;
@@ -523,8 +489,6 @@ static LRESULT CALLBACK CfgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       cfg_row(hwnd, IDC_URG_F, "Urgency factor", b, 16, y); y += CFG_ROWH;
       snprintf(b, sizeof b, "%g", g_cfg.endFreezeMs);
       cfg_row(hwnd, IDC_FREEZE, "End freeze (sec)", b, 16, y); y += CFG_ROWH;
-      snprintf(b, sizeof b, "%g", g_cfg.blinkPeriodSec);
-      cfg_row(hwnd, IDC_BLINK, "Breath period (sec)", b, 16, y);
       // 右列：7 种占比 + 单元格
       y = 12;
       char lbl[32], val[32];
@@ -562,7 +526,6 @@ static LRESULT CALLBACK PrevProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       RECT rc;
       GetClientRect(hwnd, &rc);
       draw_game(dc, rc.right, rc.bottom, 0);
-      draw_breathing(dc, rc.right, rc.bottom, 0);
       EndPaint(hwnd, &ps);
       return 0;
     }
@@ -670,7 +633,8 @@ static void parse_args(void) {
     else if (strcmp(t, "/s") == 0) g_mode = 1;
     else if (strcmp(t, "--windowed") == 0) g_windowed = 1;
   }
-  if (g_mode == 0) g_mode = 1; // /s 或无参数 = 正式运行
+  // 无参数（双击/右键"测试"）→ 窗口化测试，避免直接弹出全屏屏保；正式激活走 /s 全屏
+  if (g_mode == 0) { g_mode = 1; g_windowed = 1; }
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
