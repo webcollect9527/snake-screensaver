@@ -1,0 +1,18 @@
+{
+  "name": "snake-screensaver",
+  "version": "0.2.0",
+  "description": "AI 贪吃蛇 Windows 屏幕保护程序（.scr），原生 Win32/C 实现",
+  "author": "snake-screensaver",
+  "private": true,
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build:win": "node scripts/build-win.cjs",
+    "dist": "node scripts/build-win.cjs"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}
