@@ -84,5 +84,6 @@ void game_update(Game *g, double dtMs);
 // 供外部渲染/测试读取
 int game_is_over(Game *g);
 Point game_head(Game *g);
+double game_speed(const Game *g); // 当前速度（格/秒），考虑加速/减速效果
 
 #endif

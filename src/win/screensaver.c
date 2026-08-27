@@ -10,7 +10,11 @@
 
 // 渲染参数（可由 /c 配置窗口写入 config.json 覆盖，见 config_load）
 static int g_cell = 10;          // 单元格边长（px）
-static double g_blinkPeriod = 5.0; // 方块呼吸闪烁周期（秒）
+static double g_blinkPeriod = 5.0; // 全屏呼吸灯周期（秒）
+// 全屏呼吸灯的内存 DC（跨帧复用，避免每帧分配全屏位图）
+static HDC s_breathDc = NULL;
+static HBITMAP s_breathBmp = NULL;
+static int s_breathW = 0, s_breathH = 0;
 
 // tcc 自带头文件较老，缺少的宏/函数在此补齐
 #ifndef GET_X_LPARAM
@@ -18,6 +22,17 @@ static double g_blinkPeriod = 5.0; // 方块呼吸闪烁周期（秒）
 #define GET_Y_LPARAM(lp) ((int)(short)HIWORD(lp))
 #endif
 #define NOW_MS ((double)GetTickCount())
+
+// ---- AlphaBlend（半透明）：tcc 无 msimg32 导入库，运行时从 msimg32.dll 加载 ----
+typedef BOOL(WINAPI *AlphaBlendProc)(HDC, int, int, int, int, HDC, int, int, int, int, BLENDFUNCTION);
+static AlphaBlendProc s_alphaBlend;
+static BOOL alpha_ready(void) {
+  if (!s_alphaBlend) {
+    HMODULE h = LoadLibraryA("msimg32.dll");
+    if (h) s_alphaBlend = (AlphaBlendProc)(void *)GetProcAddress(h, "AlphaBlend");
+  }
+  return s_alphaBlend != NULL;
+}
 
 #ifdef SAVER_DEBUG
 #include <stdio.h>
@@ -126,7 +141,7 @@ static void record_stats_if_ended(void) {
 // ---- 用户配置（%APPDATA%\snake-screensaver\config.json，由 /c 设置窗口读写）----
 typedef struct {
   int cellSizePx;        // 单元格边长（px）
-  double blinkPeriodSec; // 方块呼吸闪烁周期（秒）
+  double blinkPeriodSec; // 全屏呼吸灯周期（秒）
   double baseSpeed;      // 基础速度（格/秒）
   int initialBlockCap;   // 初始同屏方块数上限
   int blockLifetime;     // 方块初始生存秒数
@@ -240,14 +255,6 @@ static void config_save(void) {
   fclose(f);
 }
 
-// 呼吸闪烁：亮度因子 f∈[0,1] 在满色与 40% 暗色间平滑过渡
-static COLORREF blend(COLORREF full, COLORREF dimc, double t) {
-  return RGB((int)(GetRValue(full) * t + GetRValue(dimc) * (1 - t)),
-             (int)(GetGValue(full) * t + GetGValue(dimc) * (1 - t)),
-             (int)(GetBValue(full) * t + GetBValue(dimc) * (1 - t)));
-}
-static COLORREF dim(COLORREF c) { return RGB(GetRValue(c) * 2 / 5, GetGValue(c) * 2 / 5, GetBValue(c) * 2 / 5); }
-
 // ---- 渲染 ----
 static void draw_game(HDC dc, int w, int h, double nowMs) {
   Rect r = g_game.grid.operable;
@@ -276,14 +283,10 @@ static void draw_game(HDC dc, int w, int h, double nowMs) {
   SelectObject(dc, oldPen);
   DeleteObject(pen);
 
-  // 方块（呼吸灯：亮度在满色/暗色间按 sin 平滑过渡，周期 g_blinkPeriod；剩余 <10s 加快预警）
+  // 方块（实色，不再闪烁；全屏呼吸灯见 draw_breathing）
   for (int i = 0; i < g_game.blockCount; i++) {
     Block *b = &g_game.blocks[i];
-    double period = b->remaining < 10 ? g_blinkPeriod / 3.0 : g_blinkPeriod;
-    double f = 0.5 + 0.5 * sin(2 * 3.14159265358979 * nowMs / 1000.0 / period);
-    COLORREF full = COLORS[b->kind - 1];
-    COLORREF c = blend(full, dim(full), f);
-    HBRUSH br = CreateSolidBrush(c);
+    HBRUSH br = CreateSolidBrush(COLORS[b->kind - 1]);
     RECT rr = {b->x * g_cell + 1, b->y * g_cell + 1, (b->x + 1) * g_cell - 1, (b->y + 1) * g_cell - 1};
     FillRect(dc, &rr, br);
     DeleteObject(br);
@@ -299,19 +302,52 @@ static void draw_game(HDC dc, int w, int h, double nowMs) {
   }
 }
 
+// 全屏呼吸灯：整屏叠加随 sin 变化的黑色半透明层（最深约 40% 变暗），周期 g_blinkPeriod
+static void draw_breathing(HDC dc, int w, int h, double nowMs) {
+  if (!alpha_ready() || w <= 0 || h <= 0) return;
+  if (!s_breathDc || s_breathW != w || s_breathH != h) {
+    if (s_breathBmp) DeleteObject(s_breathBmp);
+    if (s_breathDc) DeleteDC(s_breathDc);
+    s_breathDc = CreateCompatibleDC(dc);
+    s_breathBmp = CreateCompatibleBitmap(dc, w, h);
+    if (s_breathDc) SelectObject(s_breathDc, s_breathBmp);
+    s_breathW = w; s_breathH = h;
+  }
+  double f = 0.5 + 0.5 * sin(2 * 3.14159265358979 * nowMs / 1000.0 / g_blinkPeriod);
+  HBRUSH br = CreateSolidBrush(RGB(0, 0, 0));
+  RECT all = {0, 0, w, h};
+  FillRect(s_breathDc, &all, br);
+  DeleteObject(br);
+  BLENDFUNCTION bf = { AC_SRC_OVER, 0, (BYTE)(f * 100), 0 }; // 0..100 → 0%~40% 变暗
+  s_alphaBlend(dc, 0, 0, w, h, s_breathDc, 0, 0, w, h, bf);
+}
+
 static void draw_hud(HDC dc, int w) {
-  int rowH = 16, bw = 200, bh = 12 + rowH * 11;
+  int rowH = 16, bw = 200, bh = 12 + rowH * 12; // 12 行：7 色 + 得分/速度/时间/最佳/成败
   int bx = w - bw - 12, by = 10;
+  // 面板背景半透明（50%）：先画到内存 DC 再 AlphaBlend，文字直接画在主 DC 保持可读
+  HDC mem = CreateCompatibleDC(dc);
+  HBITMAP bmp = CreateCompatibleBitmap(dc, bw, bh);
+  HGDIOBJ ob = SelectObject(mem, bmp);
   HBRUSH bg = CreateSolidBrush(RGB(10, 10, 10));
-  RECT r = {bx, by, bx + bw, by + bh};
-  FillRect(dc, &r, bg);
+  RECT r = {0, 0, bw, bh};
+  FillRect(mem, &r, bg);
   DeleteObject(bg);
   HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 70, 70));
-  HGDIOBJ op = SelectObject(dc, pen);
-  SelectObject(dc, GetStockObject(NULL_BRUSH));
-  Rectangle(dc, bx, by, bx + bw, by + bh);
-  SelectObject(dc, op);
+  HGDIOBJ op = SelectObject(mem, pen);
+  SelectObject(mem, GetStockObject(NULL_BRUSH));
+  Rectangle(mem, 0, 0, bw, bh);
+  SelectObject(mem, op);
   DeleteObject(pen);
+  if (alpha_ready()) {
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 128, 0 }; // 50% 透明
+    s_alphaBlend(dc, bx, by, bw, bh, mem, 0, 0, bw, bh, bf);
+  } else {
+    BitBlt(dc, bx, by, bw, bh, mem, 0, 0, SRCCOPY);
+  }
+  SelectObject(mem, ob);
+  DeleteObject(bmp);
+  DeleteDC(mem);
 
   HFONT f = CreateFontA(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, "Consolas");
@@ -330,6 +366,8 @@ static void draw_hud(HDC dc, int w) {
     ly += rowH;
   }
   snprintf(buf, sizeof buf, "Score %d", g_game.score);
+  TextOutA(dc, bx + 10, ly, buf, (int)strlen(buf)); ly += rowH;
+  snprintf(buf, sizeof buf, "Speed %.1f", game_speed(&g_game));
   TextOutA(dc, bx + 10, ly, buf, (int)strlen(buf)); ly += rowH;
   int t = (int)g_game.survival;
   snprintf(buf, sizeof buf, "Time %02d:%02d", t / 60, t % 60);
@@ -376,6 +414,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       GetClientRect(hwnd, &rc);
       draw_game(dc, rc.right, rc.bottom, NOW_MS);
       draw_hud(dc, rc.right);
+      draw_breathing(dc, rc.right, rc.bottom, NOW_MS);
       EndPaint(hwnd, &ps);
       return 0;
     }
@@ -485,7 +524,7 @@ static LRESULT CALLBACK CfgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       snprintf(b, sizeof b, "%g", g_cfg.endFreezeMs);
       cfg_row(hwnd, IDC_FREEZE, "End freeze (sec)", b, 16, y); y += CFG_ROWH;
       snprintf(b, sizeof b, "%g", g_cfg.blinkPeriodSec);
-      cfg_row(hwnd, IDC_BLINK, "Blink period (sec)", b, 16, y);
+      cfg_row(hwnd, IDC_BLINK, "Breath period (sec)", b, 16, y);
       // 右列：7 种占比 + 单元格
       y = 12;
       char lbl[32], val[32];
@@ -523,6 +562,7 @@ static LRESULT CALLBACK PrevProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       RECT rc;
       GetClientRect(hwnd, &rc);
       draw_game(dc, rc.right, rc.bottom, 0);
+      draw_breathing(dc, rc.right, rc.bottom, 0);
       EndPaint(hwnd, &ps);
       return 0;
     }

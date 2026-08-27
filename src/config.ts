@@ -12,7 +12,7 @@ export const config = {
   speedUpRate: 0.01,         // 1 号效果：速度 +1%
   speedDownRate: 0.01,       // 2 号效果：速度 -1%
   endFreezeMs: 3000,         // 结束画面定格时长
-  blinkPeriodSec: 5,         // 方块呼吸闪烁周期（秒，C 渲染层，/c 可配置）
+  blinkPeriodSec: 5,         // 全屏呼吸灯周期（秒，C 渲染层，/c 可配置）
   // 颜色、分数、占比（对照 4.2 节）
   colors: ['#E5484D', '#46A758', '#3E63DD', '#FFB224', '#8E4EC6', '#00A2C7', '#FFFFFF'],
   scores: [1, 2, 1, 2, 5, 1, 5],

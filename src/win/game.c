@@ -494,3 +494,4 @@ void game_free(Game *g) {
 
 int game_is_over(Game *g) { return g->state == 1; }
 Point game_head(Game *g) { return g->snake.seg[0]; }
+double game_speed(const Game *g) { return speed_of(g); }
