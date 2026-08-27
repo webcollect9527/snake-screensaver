@@ -20,8 +20,10 @@ AI 自动操控的贪吃蛇 Windows 屏幕保护程序（`.scr`）· 原生 Win3
 - **场地缩小**：方块超时 → 随机选边向内推进面积 1/10，避开蛇身与方块，被阻挡延迟执行
 - **四种结束**：铺满成功 / 撞墙 / 撞自己 / 场地耗尽；结束定格 3 秒自动重开
 - **HUD**：7 色计数、得分、本局/最高生存时间、成功/失败次数
-- **跨会话持久化**：`%APPDATA%\snake-screensaver\stats.json`
-- **原生屏保协议**：`/s` 全屏置顶隐藏鼠标 + 位移>10px/按键/点击退出；`/c` 配置窗口；`/p` 预览
+- **呼吸灯方块**：方块亮度按 sin 平滑呼吸（默认周期 5s，可配置），临期自动加快预警
+- **可配置设置**：`/c` 设置窗口可调速度/方块/缩场/方块占比/闪烁周期等全部参数，持久化到 `config.json`
+- **跨会话持久化**：`%APPDATA%\snake-screensaver\stats.json`（统计）与 `config.json`（设置）
+- **原生屏保协议**：`/s` 全屏置顶隐藏鼠标 + 位移>10px/按键/点击退出；`/c` 设置窗口；`/p` 预览
 - **极小**：单文件 `SnakeScreensaver.scr` 约 **30 KB**，无需任何运行时依赖
 
 > 为什么弃用 Electron？Electron 便携版与 Windows 屏保协议不兼容（NSIS 桩会把 `/c`、`/s` 当安装器开关，报 "error launching installer"），且无法做到真全屏、体积最小也有 ~80MB。原生 Win32/C 是 Windows 屏保的标准形态：一个文件、原生协议、几十 KB。
@@ -71,18 +73,20 @@ npm run build:win # 含 C 版逻辑自检（game_test.exe），验证原生实�
 
 ## ⚙️ 可调参数
 
-集中在 `src/win/game.c` 顶部宏（与 `src/config.ts` 一致）：
+默认值集中在 `src/win/game.c` 的 `params_default()`（与 `src/config.ts` 一致）。**运行时可配置**：右键 `.scr` →「设置」，或运行 `/c` 打开设置窗口，保存到 `%APPDATA%\snake-screensaver\config.json`。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `BASE_SPEED` | 10 | 基础速度（格/秒） |
-| `INIT_BLOCK_CAP` | 3 | 初始同屏方块数上限 |
-| `BLOCK_LIFETIME` | 60 | 方块初始生存时间（秒） |
-| `SHRINK_FRACTION` | 0.1 | 场地每次缩小比例 |
-| `URGENCY_THRESHOLD` | 5s | 临期方块判定 |
-| `URGENCY_FACTOR` | 3 | 临期权重提升 |
-| `END_FREEZE_MS` | 3000 | 结束定格时长 |
-| `CELL` | 10px | 单元格边长（screensaver.c） |
+| `baseSpeed` | 10 | 基础速度（格/秒） |
+| `initialBlockCap` | 3 | 初始同屏方块数上限 |
+| `blockLifetime` | 60 | 方块初始生存时间（秒） |
+| `shrinkFraction` | 0.1 | 场地每次缩小比例 |
+| `urgencyThreshold` | 5 | 临期方块判定（松弛 <N 秒） |
+| `urgencyFactor` | 3 | 临期权重提升 |
+| `endFreezeMs` | 3000 | 结束定格时长（毫秒） |
+| `cellSizePx` | 10 | 单元格边长（px） |
+| `blinkPeriodSec` | 5 | 方块呼吸闪烁周期（秒，优化点 1） |
+| `weights[1..7]` | 10:9:4:4:3:3:1 | 7 种方块生成占比 |
 
 ## ❓ FAQ
 
@@ -90,7 +94,7 @@ npm run build:win # 含 C 版逻辑自检（game_test.exe），验证原生实�
 |---|---|
 | 动一下鼠标屏保就退出？ | 屏保正常行为：位移 >10px、按键、点击均退出 |
 | 配置窗口打不开？ | `/c` 打开配置窗口；若直接双击 .scr 是运行不是配置 |
-| 统计存在哪？ | `%APPDATA%\snake-screensaver\stats.json` |
+| 统计/设置存在哪？ | `%APPDATA%\snake-screensaver\stats.json`（统计）、`config.json`（设置） |
 | 场地越来越小？ | 方块超时未吃会触发缩场（1/10），剩余空地不足判定「场地耗尽」 |
 
 ## 📄 License

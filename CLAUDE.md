@@ -22,7 +22,7 @@ Windows 把屏保当作带命令行参数的 exe（改名 .scr）调用，主进
 | 参数 | 含义 | 行为 |
 |---|---|---|
 | `/s`（或无参数） | 正式运行 | 全屏、置顶、无边框窗口启动游戏；鼠标移动/按键/点击 → 退出屏保 |
-| `/c` | 配置 | 显示简单配置窗口（初始速度、同屏方块数初始值等，可先做最小化版本） |
+| `/c` | 配置 | 设置窗口：可调参数（速度/方块/缩场/临期）+ 7 种方块生成占比 + 呼吸闪烁周期，保存到 `config.json` |
 | `/p <hwnd>` | 小预览 | 在系统"屏幕保护程序设置"对话框的预览区嵌入渲染（MVP 阶段可只画静态帧或黑屏，标注 TODO） |
 
 注意：
@@ -43,7 +43,7 @@ Windows 把屏保当作带命令行参数的 exe（改名 .scr）调用，主进
 ### 4.2 方块系统
 
 - 方块与蛇等宽（1 单元格），生成于可操作区域内**随机空格子**（不与蛇身、其他方块重叠）。
-- 方块带**闪烁效果**（透明度脉冲，周期 ~1s），并在剩余存活时间 < 10s 时闪烁加快（预警）。
+- 方块带**呼吸灯效果**：亮度按 sin 在满色/40% 暗色间平滑过渡，默认周期 **5 秒**（`blinkPeriodSec`，可配置）；剩余存活时间 < 10s 时周期缩短至 1/3 预警（仍为平滑呼吸，不做硬闪烁）。
 - **每个方块存活时间初始 60 秒**；效果 3/4 动态增减后，新方块按当前全局生存时间生成，已在场的方块按剩余时间等比换算或保持不变（采用：**只影响后续生成**，已在场方块不回溯，实现简单）。
 - 同时在场方块数有全局上限，初始值 **3**（待确认项①），效果 5/6 增减上限，下限 1。
 
@@ -118,8 +118,8 @@ Windows 把屏保当作带命令行参数的 exe（改名 .scr）调用，主进
 ```
 src/
 ├── win/                  # 原生 C 实现（产品）
-│   ├── screensaver.c     # Win32 壳：/s /c /p、退出监听、GDI 渲染、HUD、stats.json
-│   ├── game.c / game.h   # 纯游戏逻辑：状态机、网格、蛇、方块、寻路、效果、缩场
+│   ├── screensaver.c     # Win32 壳：/s /c /p、退出监听、GDI 渲染、HUD、stats.json、config.json 读写 + /c 设置窗口
+│   ├── game.c / game.h   # 纯游戏逻辑：状态机、网格、蛇、方块、寻路、效果、缩场、可调参数 Params
 │   └── game_test.c       # 逻辑自检：AI 整局模拟 + 行为断言（控制台，无 GUI 可跑）
 ├── game/                 # TypeScript 逻辑参考实现（算法可执行规格，vitest 单测）
 │   ├── engine.ts         # 游戏主循环、tick 调度、状态机
@@ -138,7 +138,9 @@ src/
 7. **屏保退出**：正式模式下监听 `mouse-move`（累计位移阈值）、`key-down`、`mouse-down` → `app.quit()`。
 8. **多显示器**：MVP 只覆盖主屏，全屏窗口 `x:0,y:0`。
 
-## 7. 数据持久化（stats.json）
+## 7. 数据持久化
+
+统计（`%APPDATA%\snake-screensaver\stats.json`）：
 
 ```json
 {
@@ -151,6 +153,26 @@ src/
 ```
 
 写入时机：每局结束时。读取时机：启动时。
+
+设置（`%APPDATA%\snake-screensaver\config.json`，由 `/c` 设置窗口读写）：
+
+```json
+{
+  "cellSizePx": 10,
+  "blinkPeriodSec": 5,
+  "baseSpeed": 10,
+  "initialBlockCap": 3,
+  "blockLifetime": 60,
+  "shrinkFraction": 0.1,
+  "urgencyThreshold": 5,
+  "urgencyFactor": 3,
+  "endFreezeMs": 3000,
+  "weights": [10,9,4,4,3,3,1]
+}
+```
+
+- 启动时 `config_load()` 读取（缺失字段回退默认值），通过 `game_set_params()` 应用到 `Params`（game.c 顶部宏已改为运行时 `params` 字段）。
+- 游戏参数默认值唯一来源为 `game.c` 的 `params_default()`（与 `src/config.ts` 一致），渲染参数（`cellSizePx`、`blinkPeriodSec`）由 screensaver.c 管理。
 
 ## 8. 待确认问题（实现前需与用户确认）
 
@@ -175,7 +197,7 @@ src/
 
 ## 10. 开发规范
 
-- 所有可调参数集中在 `src/win/game.c` 顶部宏（与 `src/config.ts` 一致），禁止魔法数字散落。
+- 所有可调参数集中在 `src/win/game.c` 的 `params_default()`（与 `src/config.ts` 一致），运行时可被 `/c` 配置覆盖，禁止魔法数字散落。
 - 游戏逻辑（game.c / game.ts）不得依赖窗口/渲染 API：TS 参考实现用 vitest 单测；C 原生实现用 `game_test.c`（AI 整局模拟 + 行为断言）保证与参考实现行为一致。
 - 每轮迭代由用户实测反馈 bug，修复后需复测通过才关闭问题。
 - 需求变更：先改本文档，再改代码。

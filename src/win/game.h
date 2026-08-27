@@ -10,6 +10,22 @@ typedef struct { int x, y; } Point;
 
 typedef struct { int x0, y0, x1, y1; } Rect;
 
+// 可调参数（与 src/config.ts 一致；默认值见 params_default()，运行时可被 /c 配置覆盖）
+typedef struct {
+  double baseSpeed;        // 基础速度：格/秒
+  int initialBlockCap;     // 初始同屏方块数上限
+  int blockLifetime;       // 方块初始生存秒数
+  int blockCapMin;         // 同屏方块数下限
+  int lifetimeMin;         // 生存时间下限（防除零/瞬时超时）
+  double shrinkFraction;   // 场地每次缩小比例
+  double urgencyThreshold; // 临期方块判定（松弛 <N 秒）
+  double urgencyFactor;    // 临期权重提升倍数
+  double speedUpRate;      // 1 号效果：速度 +比例
+  double speedDownRate;    // 2 号效果：速度 -比例
+  double endFreezeMs;      // 结束画面定格时长
+  int weights[7];          // 7 种方块生成占比
+} Params;
+
 typedef struct {
   int w, h;
   Rect operable;
@@ -38,6 +54,7 @@ typedef struct {
   Grid grid;
   Snake snake;
   Effects fx;
+  Params params;
   Block blocks[MAX_BLOCKS];
   int blockCount;
   int score;
@@ -57,6 +74,8 @@ typedef struct {
   int *path;
 } Game;
 
+Params params_default(void);
+void game_set_params(Game *g, const Params *p);
 void game_init(Game *g, int w, int h, unsigned seed);
 void game_free(Game *g);
 void game_reset(Game *g);

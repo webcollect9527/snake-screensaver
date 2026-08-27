@@ -4,21 +4,41 @@
 #include <math.h>
 #include "game.h"
 
-// ---- 可调参数（与 src/config.ts 一致）----
-#define BASE_SPEED 10.0       // 基础速度：格/秒
-#define INIT_BLOCK_CAP 3      // 初始同屏方块数上限
-#define BLOCK_LIFETIME 60     // 方块初始生存秒数
-#define BLOCK_CAP_MIN 1
-#define LIFETIME_MIN 1
-#define SHRINK_FRACTION 0.1   // 场地每次缩小比例
-#define URGENCY_THRESHOLD 5.0 // 临期方块判定（松弛 <5s）
-#define URGENCY_FACTOR 3.0
-#define SPEED_UP_RATE 0.01
-#define SPEED_DOWN_RATE 0.01
-#define END_FREEZE_MS 3000.0
+// ---- 可调参数（与 src/config.ts 一致；运行时可被 /c 配置覆盖）----
+Params params_default(void) {
+  Params p;
+  p.baseSpeed = 10.0;        // 基础速度：格/秒
+  p.initialBlockCap = 3;     // 初始同屏方块数上限
+  p.blockLifetime = 60;      // 方块初始生存秒数
+  p.blockCapMin = 1;
+  p.lifetimeMin = 1;
+  p.shrinkFraction = 0.1;    // 场地每次缩小比例
+  p.urgencyThreshold = 5.0;  // 临期方块判定（松弛 <5s）
+  p.urgencyFactor = 3.0;
+  p.speedUpRate = 0.01;
+  p.speedDownRate = 0.01;
+  p.endFreezeMs = 3000.0;
+  int w[7] = { 10, 9, 4, 4, 3, 3, 1 };
+  memcpy(p.weights, w, sizeof w);
+  return p;
+}
+
+void game_set_params(Game *g, const Params *p) {
+  g->params = *p;
+  if (g->params.initialBlockCap < 1) g->params.initialBlockCap = 1;
+  if (g->params.initialBlockCap > MAX_BLOCKS) g->params.initialBlockCap = MAX_BLOCKS;
+  if (g->params.blockLifetime < g->params.lifetimeMin) g->params.blockLifetime = g->params.lifetimeMin;
+  if (g->params.shrinkFraction <= 0 || g->params.shrinkFraction >= 1) g->params.shrinkFraction = 0.1;
+  if (g->params.endFreezeMs < 0) g->params.endFreezeMs = 0;
+  int total = 0;
+  for (int i = 0; i < 7; i++) {
+    if (g->params.weights[i] < 0) g->params.weights[i] = 0;
+    total += g->params.weights[i];
+  }
+  if (total == 0) { int d[7] = { 10, 9, 4, 4, 3, 3, 1 }; memcpy(g->params.weights, d, sizeof d); }
+}
 
 static const int SCORES[7] = { 1, 2, 1, 2, 5, 1, 5 };
-static const int WEIGHTS[7] = { 10, 9, 4, 4, 3, 3, 1 };
 
 static const Point DIRS[4] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
 
@@ -72,11 +92,12 @@ static Point snake_step(Snake *s, Point dir, int grow, int newColor) {
 }
 
 // ---- Effects ----
-static double speed_of(const Effects *fx) {
-  // 对数计数避免浮点连乘误差：base * 1.01^up * 0.99^down
-  double ln = log(BASE_SPEED)
-            + fx->speedUp * log(1 + SPEED_UP_RATE)
-            + fx->speedDown * log(1 - SPEED_DOWN_RATE);
+static double speed_of(const Game *g) {
+  const Effects *fx = &g->fx;
+  // 对数计数避免浮点连乘误差：base * (1+rate)^up * (1-rate)^down
+  double ln = log(g->params.baseSpeed)
+            + fx->speedUp * log(1 + g->params.speedUpRate)
+            + fx->speedDown * log(1 - g->params.speedDownRate);
   return exp(ln);
 }
 
@@ -88,19 +109,19 @@ static void effects_apply(Effects *fx, int kind, Game *g) {
     case 1: fx->speedUp++; break;
     case 2: fx->speedDown++; break;
     case 3: fx->lifetime += 1; break;
-    case 4: if (fx->lifetime > LIFETIME_MIN) fx->lifetime--; break;
+    case 4: if (fx->lifetime > g->params.lifetimeMin) fx->lifetime--; break;
     case 5: if (fx->blockCap < MAX_BLOCKS - 1) fx->blockCap++; break;
-    case 6: if (fx->blockCap > BLOCK_CAP_MIN) fx->blockCap--; break;
+    case 6: if (fx->blockCap > g->params.blockCapMin) fx->blockCap--; break;
   }
 }
 
 // 按占比抽样方块类型（1..7）
 static int pick_kind(Game *g) {
   int total = 0;
-  for (int i = 0; i < 7; i++) total += WEIGHTS[i];
+  for (int i = 0; i < 7; i++) total += g->params.weights[i];
   int r = (int)(rng_unit(g) * total);
   for (int i = 0; i < 7; i++) {
-    r -= WEIGHTS[i];
+    r -= g->params.weights[i];
     if (r < 0) return i + 1;
   }
   return 7;
@@ -230,9 +251,9 @@ static Point decide(Game *g) {
     if (d > 0) {
       reach[rc] = i;
       rdist[rc] = d;
-      double t = d / speed_of(&g->fx);
+      double t = d / speed_of(g);
       double slack = b->remaining - t;
-      double urgency = slack < URGENCY_THRESHOLD ? URGENCY_FACTOR : 1.0;
+      double urgency = slack < g->params.urgencyThreshold ? g->params.urgencyFactor : 1.0;
       rscore[rc] = (SCORES[b->kind - 1] / (d + 1.0)) * urgency;
       rc++;
     }
@@ -274,10 +295,10 @@ static int try_shrink(Game *g) {
   int ar = area(&g->grid);
   int w = r->x1 - r->x0, h = r->y1 - r->y0;
   struct Edge { int idx; int depth; } edges[4] = {
-    {0, (int)ceil(ar * SHRINK_FRACTION / h)},
-    {1, (int)ceil(ar * SHRINK_FRACTION / h)},
-    {2, (int)ceil(ar * SHRINK_FRACTION / w)},
-    {3, (int)ceil(ar * SHRINK_FRACTION / w)},
+    {0, (int)ceil(ar * g->params.shrinkFraction / h)},
+    {1, (int)ceil(ar * g->params.shrinkFraction / h)},
+    {2, (int)ceil(ar * g->params.shrinkFraction / w)},
+    {3, (int)ceil(ar * g->params.shrinkFraction / w)},
   };
   // 随机顺序（Fisher-Yates）
   for (int i = 3; i > 0; i--) {
@@ -314,7 +335,7 @@ static void spawn_to_cap(Game *g);
 static void end_game(Game *g, int reason) {
   g->state = 1;
   g->reason = reason;
-  g->overTimer = END_FREEZE_MS;
+  g->overTimer = g->params.endFreezeMs;
 }
 
 static void free_cells(Game *g, Point *out, int *n) {
@@ -414,7 +435,7 @@ void game_update(Game *g, double dtMs) {
 
   // 按当前速度走步
   g->accumMs += dtMs;
-  double stepMs = 1000.0 / speed_of(&g->fx);
+  double stepMs = 1000.0 / speed_of(g);
   while (g->accumMs >= stepMs && g->state == 0) {
     g->accumMs -= stepMs;
     move_step(g);
@@ -423,7 +444,7 @@ void game_update(Game *g, double dtMs) {
 
 void game_reset(Game *g) {
   g->grid.operable = (Rect){ 0, 0, g->grid.w, g->grid.h };
-  g->fx = (Effects){ 0, 0, BLOCK_LIFETIME, INIT_BLOCK_CAP };
+  g->fx = (Effects){ 0, 0, g->params.blockLifetime, g->params.initialBlockCap };
   g->blockCount = 0;
   g->score = 0;
   memset(g->colorCounts, 0, sizeof(g->colorCounts));
@@ -461,6 +482,7 @@ void game_init(Game *g, int w, int h, unsigned seed) {
   g->tmpBody = (Point *)malloc(sizeof(Point) * (n + 2));
   g->path = (int *)malloc(sizeof(int) * n);
   g->rngState = seed ? seed : 0x9E3779B9u;
+  g->params = params_default();
   game_reset(g);
 }
 

@@ -2,6 +2,7 @@
 // 编译：gcc src/win/game_test.c src/win/game.c -o game_test.exe
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "game.h"
 
 static int failures = 0;
@@ -66,10 +67,28 @@ static void test_wall_death(void) {
   game_free(&g);
 }
 
+// 可配置参数（/c）：初始方块数、占比抽样生效
+static void test_params(void) {
+  Game g;
+  game_init(&g, 20, 20, 7);
+  Params p = params_default();
+  p.initialBlockCap = 5;
+  int w[7] = { 100, 0, 0, 0, 0, 0, 0 };
+  memcpy(p.weights, w, sizeof w);
+  game_set_params(&g, &p);
+  game_reset(&g);
+  CHECK(g.blockCount == 5, "配置的初始方块数应生效");
+  int allKind1 = 1;
+  for (int i = 0; i < g.blockCount; i++) if (g.blocks[i].kind != 1) allKind1 = 0;
+  CHECK(allKind1, "配置的占比应生效（只出 1 号）");
+  game_free(&g);
+}
+
 int main(void) {
   sim();
   test_eat();
   test_wall_death();
+  test_params();
   if (failures) {
     printf("%d FAILURES\n", failures);
     return 1;
