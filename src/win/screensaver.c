@@ -293,7 +293,7 @@ static void draw_clock(HDC dc) {
   int x = 2 * g_cell, y0 = 2 * g_cell;
   HBRUSH br = CreateSolidBrush(c);
   for (char *p = time; *p; p++) {
-    if (*p == ':') { // 冒号 2 点宽
+    if (*p == ':') { // 冒号：上下两点（1 列宽），advance 右侧自带 1 空格（dx）
       for (int r = 0; r < 7; r++) {
         if (r == 2 || r == 5) {
           RECT rr = {x, y0 + r * dy, x + dot, y0 + r * dy + dot};
@@ -309,7 +309,8 @@ static void draw_clock(HDC dc) {
             RECT rr = {x + col * dx, y0 + r * dy, x + col * dx + dot, y0 + r * dy + dot};
             FillRect(dc, &rr, br);
           }
-      x += 5 * dx - gap; // 数字 14px 宽；6 位 + 2 冒号共 94px ≤ 10 个单元格
+      x += 5 * dx - gap; // 数字宽
+      if (p[1]) x += dx; // 后跟数字（同对 HH/MM/SS）或冒号（冒号左侧）→ 留 1 空格
     }
   }
   DeleteObject(br);
