@@ -1,7 +1,7 @@
 // 所有可调参数集中管理，禁止魔法数字散落。
 export const config = {
   cellSizePx: 10,            // 单元格边长（px，渲染层再乘 devicePixelRatio）
-  baseSpeedCellsPerSec: 10,  // 基础速度：10 格/秒
+  baseSpeedCellsPerSec: 20,  // 基础速度：20 格/秒（初始默认翻倍）
   initialBlockCap: 3,        // 初始同屏方块数上限（待确认项①，按 4.2 节取值）
   blockLifetimeSec: 60,      // 方块初始生存时间（秒）
   blockCapMin: 1,            // 同屏方块数上限下限

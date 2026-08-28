@@ -41,7 +41,7 @@ static void test_eat(void) {
   g.snake.dir = (Point){1, 0};
   g.blocks[0] = (Block){11, 10, 1, 60.0};
   g.blockCount = 1;
-  game_update(&g, 100.0); // 基础速度 10 格/秒 → 一步
+  game_update(&g, 1000.0 / game_speed(&g)); // 恰好一步（速度可配置）
   CHECK(g.score == 1, "吃到 1 号方块得分 1");
   CHECK(g.colorCounts[0] == 1, "1 号色计数 +1");
   CHECK(g.snake.len == 4, "蛇长 +1");

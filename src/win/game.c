@@ -7,7 +7,7 @@
 // ---- 可调参数（与 src/config.ts 一致；运行时可被 /c 配置覆盖）----
 Params params_default(void) {
   Params p;
-  p.baseSpeed = 10.0;        // 基础速度：格/秒
+  p.baseSpeed = 20.0;        // 基础速度：格/秒（初始默认翻倍）
   p.initialBlockCap = 3;     // 初始同屏方块数上限
   p.blockLifetime = 60;      // 方块初始生存秒数
   p.blockCapMin = 1;

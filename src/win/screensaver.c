@@ -54,6 +54,7 @@ static int g_windowed = 0;    // --windowed 调试模式（普通窗口、不监
 static int g_saverMode = 0;   // 正式屏保（全屏 + 退出监听 + 隐藏光标）
 static int g_cols, g_rows;
 static HWND g_hwnd;
+static HWND g_parentHwnd = NULL; // Windows 设置对话框传入的父窗口句柄（/c:<hwnd>、/p <hwnd>）
 static long g_lastX = -1, g_lastY = -1, g_moveDist = 0;
 static int g_ended = 0;
 static int g_timerMs = 16; // 逻辑/渲染定时器间隔（ms），启动时按显示器刷新率对齐（60Hz→16，120Hz→8）
@@ -251,7 +252,11 @@ static void config_save(void) {
 }
 
 // ---- 渲染（整帧画进内存 DC，由 paint_frame 一次上屏）----
-static void draw_game(HDC dc, int w, int h) {
+// 亮度倍率：k=1 满色，k 越小越暗
+static COLORREF dim_color(COLORREF c, double k) {
+  return RGB((int)(GetRValue(c) * k), (int)(GetGValue(c) * k), (int)(GetBValue(c) * k));
+}
+static void draw_game(HDC dc, int w, int h, double nowMs) {
   Rect r = g_game.grid.operable;
 
   // 围墙（可操作区域外）
@@ -274,10 +279,18 @@ static void draw_game(HDC dc, int w, int h) {
   SelectObject(dc, oldPen);
   DeleteObject(pen);
 
-  // 方块（实色，无任何闪烁/呼吸效果）
+  // 方块：呼吸式缓慢明暗（周期 10s：亮→暗 5s、暗→亮 5s）；剩余 <10s 快速闪烁预警
+  double secs = nowMs / 1000.0;
   for (int i = 0; i < g_game.blockCount; i++) {
     Block *b = &g_game.blocks[i];
-    HBRUSH br = CreateSolidBrush(COLORS[b->kind - 1]);
+    COLORREF full = COLORS[b->kind - 1];
+    double k; // 亮度倍率（1=满色，0.15=最暗仍可见）
+    if (b->remaining < 10) {
+      k = (sin(2 * 3.14159265358979 * secs / 0.5) < 0) ? 0.15 : 1.0; // 临期快速闪烁
+    } else {
+      k = 0.15 + 0.85 * (0.5 + 0.5 * cos(2 * 3.14159265358979 * secs / 10.0)); // 10s 呼吸，起点最亮
+    }
+    HBRUSH br = CreateSolidBrush(dim_color(full, k));
     RECT rr = {b->x * g_cell + 1, b->y * g_cell + 1, (b->x + 1) * g_cell - 1, (b->y + 1) * g_cell - 1};
     FillRect(dc, &rr, br);
     DeleteObject(br);
@@ -366,7 +379,7 @@ static HDC ensure_memdc(HDC ref, int w, int h) {
 }
 
 // 离屏双缓冲渲染：清背景→画游戏→画 HUD 全在内存 DC 完成，最后一次性 BitBlt 上屏
-static void paint_frame(HWND hwnd, int showHud) {
+static void paint_frame(HWND hwnd, int showHud, double nowMs) {
   PAINTSTRUCT ps;
   HDC wdc = BeginPaint(hwnd, &ps);
   RECT rc;
@@ -378,7 +391,7 @@ static void paint_frame(HWND hwnd, int showHud) {
     RECT all = {0, 0, w, h};
     FillRect(mdc, &all, black);
     DeleteObject(black);
-    draw_game(mdc, w, h);
+    draw_game(mdc, w, h, nowMs);
     if (showHud) draw_hud(mdc, w);
     BitBlt(wdc, 0, 0, w, h, mdc, 0, 0, SRCCOPY);
   }
@@ -413,7 +426,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       InvalidateRect(hwnd, NULL, FALSE);
       return 0;
     case WM_PAINT:
-      paint_frame(hwnd, 1);
+      paint_frame(hwnd, 1, NOW_MS);
       return 0;
     case WM_DESTROY:
       DBG("[wnd] WM_DESTROY\n");
@@ -554,7 +567,7 @@ static LRESULT CALLBACK PrevProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND:
       return 1;
     case WM_PAINT:
-      paint_frame(hwnd, 0);
+      paint_frame(hwnd, 0, 0);
       return 0;
     case WM_DESTROY:
       PostQuitMessage(0);
@@ -629,7 +642,7 @@ static void run_config(void) {
   HWND hwnd = CreateWindowExA(0, "SnakeSaverCfgClass", "Snake Screensaver Settings",
                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                               CW_USEDEFAULT, CW_USEDEFAULT, 570, 336,
-                              NULL, NULL, g_hInst, NULL);
+                              g_parentHwnd, NULL, g_hInst, NULL); // 归属设置对话框（若有）
   ShowWindow(hwnd, SW_SHOW);
   g_dialogKeys = 1;
   loop(hwnd);
@@ -656,15 +669,27 @@ static void parse_args(void) {
   char *src = GetCommandLineA();
   strncpy(cmd, src, sizeof(cmd) - 1);
   cmd[sizeof(cmd) - 1] = 0;
-  // 按空格分词并精确匹配独立参数，避免路径中误含 "/c" 等子串
+  // Windows 屏保协议：/s、/c、/p <hwnd>；也兼容冒号形式 /c:<hwnd>、/p:<hwnd>（设置对话框可能这样传参）
+  int expectParent = 0;
   for (char *t = strtok(cmd, " \t"); t; t = strtok(NULL, " \t")) {
     int len = (int)strlen(t);
     if (len >= 2 && (t[0] == '"' || t[len - 1] == '"')) { t[len - 1] = 0; t++; }
     for (char *q = t; *q; q++) *q = (char)tolower((unsigned char)*q);
-    if (strcmp(t, "/c") == 0) g_mode = 2;
-    else if (strcmp(t, "/p") == 0) g_mode = 3;
-    else if (strcmp(t, "/s") == 0) g_mode = 1;
+    if (strncmp(t, "/c", 2) == 0 && (t[2] == 0 || t[2] == ':')) {
+      g_mode = 2;
+      if (t[2] == ':') g_parentHwnd = (HWND)(INT_PTR)strtol(t + 3, NULL, 10); // /c:<hwnd> 归属设置对话框
+    }
+    else if (strncmp(t, "/p", 2) == 0 && (t[2] == 0 || t[2] == ':')) {
+      g_mode = 3;
+      if (t[2] == ':') { g_parentHwnd = (HWND)(INT_PTR)strtol(t + 3, NULL, 10); expectParent = 0; }
+      else expectParent = 1; // /p <hwnd> 空格形式：下一 token 是父窗口句柄
+    }
+    else if (strncmp(t, "/s", 2) == 0 && (t[2] == 0 || t[2] == ':')) g_mode = 1;
     else if (strcmp(t, "--windowed") == 0) g_windowed = 1;
+    if (expectParent) {
+      g_parentHwnd = (HWND)(INT_PTR)strtol(t, NULL, 10);
+      expectParent = 0;
+    }
   }
   // 无参数（双击/右键"测试"）→ 窗口化测试，避免直接弹出全屏屏保；正式激活走 /s 全屏
   if (g_mode == 0) { g_mode = 1; g_windowed = 1; }
@@ -677,18 +702,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
   parse_args();
   if (g_mode == 2) run_config();
   else if (g_mode == 3) {
-    // Windows 传 /p <hwnd>：取最后一个 token 作为父窗口
-    char *cmd = GetCommandLineA();
-    char *last = NULL, *tok = cmd;
-    while (tok && *tok) {
-      if (tok[0] == '/' || tok[0] == ' ' || tok[0] == '"') { tok++; continue; }
-      char *sp = strchr(tok, ' ');
-      last = tok;
-      tok = sp ? sp + 1 : NULL;
-    }
-    HWND parent = NULL;
-    if (last) parent = (HWND)(INT_PTR)strtol(last, NULL, 10);
-    run_preview(parent);
+    run_preview(g_parentHwnd); // 父窗口句柄已在 parse_args 解析（/p <hwnd> 或 /p:<hwnd>）
   } else {
     run_screensaver();
   }
