@@ -14,6 +14,8 @@ static int g_cell = 10;          // 单元格边长（px）
 static HDC s_memDc = NULL;
 static HBITMAP s_memBmp = NULL;
 static int s_memW = 0, s_memH = 0;
+// 常亮元素（围墙/网格/HUD，除蛇与时钟）的呼吸亮度倍率，每帧由 paint_frame 计算（滞后方块 2s）
+static double s_frameK = 1.0;
 
 // tcc 自带头文件较老，缺少的宏/函数在此补齐
 #ifndef GET_X_LPARAM
@@ -256,11 +258,63 @@ static void config_save(void) {
 static COLORREF dim_color(COLORREF c, double k) {
   return RGB((int)(GetRValue(c) * k), (int)(GetGValue(c) * k), (int)(GetBValue(c) * k));
 }
+// 方块呼吸系数：10s 周期（亮→暗 5s、暗→亮 5s），k∈[0.15,1.0]，最暗仍可见
+static double breath_k(double secs) {
+  return 0.15 + 0.85 * (0.5 + 0.5 * cos(2 * 3.14159265358979 * secs / 10.0));
+}
+
+// 复古点阵 5x7 电子表字库（每字符 7 行，bit4..bit0 = 左..右）
+static const unsigned char FONT5x7[10][7] = {
+  {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, // 0
+  {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}, // 1
+  {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F}, // 2
+  {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E}, // 3
+  {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, // 4
+  {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E}, // 5
+  {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, // 6
+  {0x1F,0x01,0x02,0x04,0x08,0x08,0x08}, // 7
+  {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, // 8
+  {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, // 9
+};
+
+// 数字时钟：左上角，距上/左各 2 个单元格；颜色 = 蛇头颜色；呼吸豁免
+static void draw_clock(HDC dc) {
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  char time[16];
+  snprintf(time, sizeof time, "%02d:%02d:%02d", st.wHour, st.wMinute, st.wSecond);
+  COLORREF c = COLORS[g_game.snake.color[0]]; // 与蛇头颜色一致（随吃到颜色变化）
+  const int dot = 2, gap = 1, dx = dot + gap, dy = dot + gap; // 点 2px、间距 1px
+  int x = 2 * g_cell, y0 = 2 * g_cell;
+  HBRUSH br = CreateSolidBrush(c);
+  for (char *p = time; *p; p++) {
+    if (*p == ':') { // 冒号 2 点宽
+      for (int r = 0; r < 7; r++) {
+        if (r == 2 || r == 5) {
+          RECT rr = {x, y0 + r * dy, x + dot, y0 + r * dy + dot};
+          FillRect(dc, &rr, br);
+        }
+      }
+      x += 2 * dx - gap;
+    } else {
+      const unsigned char *pat = FONT5x7[*p - '0'];
+      for (int r = 0; r < 7; r++)
+        for (int col = 0; col < 5; col++)
+          if (pat[r] & (1 << (4 - col))) {
+            RECT rr = {x + col * dx, y0 + r * dy, x + col * dx + dot, y0 + r * dy + dot};
+            FillRect(dc, &rr, br);
+          }
+      x += 5 * dx - gap; // 数字 14px 宽；6 位 + 2 冒号共 94px ≤ 10 个单元格
+    }
+  }
+  DeleteObject(br);
+}
+
 static void draw_game(HDC dc, int w, int h, double nowMs) {
   Rect r = g_game.grid.operable;
 
-  // 围墙（可操作区域外）
-  HBRUSH wall = CreateSolidBrush(WALL_COLOR);
+  // 围墙（可操作区域外，参与呼吸，滞后方块 2s）
+  HBRUSH wall = CreateSolidBrush(dim_color(WALL_COLOR, s_frameK));
   RECT top = {0, 0, w, r.y0 * g_cell};
   RECT bot = {0, r.y1 * g_cell, w, h - r.y1 * g_cell};
   RECT lef = {0, r.y0 * g_cell, r.x0 * g_cell, (r.y1 - r.y0) * g_cell};
@@ -271,8 +325,8 @@ static void draw_game(HDC dc, int w, int h, double nowMs) {
   FillRect(dc, &rig, wall);
   DeleteObject(wall);
 
-  // 网格线
-  HPEN pen = CreatePen(PS_SOLID, 1, RGB(20, 20, 20));
+  // 网格线（参与呼吸，滞后方块 2s）
+  HPEN pen = CreatePen(PS_SOLID, 1, dim_color(RGB(20, 20, 20), s_frameK));
   HGDIOBJ oldPen = SelectObject(dc, pen);
   for (int x = r.x0; x <= r.x1; x++) { MoveToEx(dc, x * g_cell, r.y0 * g_cell, NULL); LineTo(dc, x * g_cell, r.y1 * g_cell); }
   for (int y = r.y0; y <= r.y1; y++) { MoveToEx(dc, r.x0 * g_cell, y * g_cell, NULL); LineTo(dc, r.x1 * g_cell, y * g_cell); }
@@ -288,7 +342,7 @@ static void draw_game(HDC dc, int w, int h, double nowMs) {
     if (b->remaining < 10) {
       k = (sin(2 * 3.14159265358979 * secs / 0.5) < 0) ? 0.15 : 1.0; // 临期快速闪烁
     } else {
-      k = 0.15 + 0.85 * (0.5 + 0.5 * cos(2 * 3.14159265358979 * secs / 10.0)); // 10s 呼吸，起点最亮
+      k = breath_k(secs); // 10s 呼吸，起点最亮
     }
     HBRUSH br = CreateSolidBrush(dim_color(full, k));
     RECT rr = {b->x * g_cell + 1, b->y * g_cell + 1, (b->x + 1) * g_cell - 1, (b->y + 1) * g_cell - 1};
@@ -296,7 +350,7 @@ static void draw_game(HDC dc, int w, int h, double nowMs) {
     DeleteObject(br);
   }
 
-  // 蛇（尾先画）
+  // 蛇（尾先画，蛇自身不参与呼吸）
   for (int i = g_game.snake.len - 1; i >= 0; i--) {
     Point p = g_game.snake.seg[i];
     HBRUSH br = CreateSolidBrush(COLORS[g_game.snake.color[i]]);
@@ -304,6 +358,9 @@ static void draw_game(HDC dc, int w, int h, double nowMs) {
     FillRect(dc, &rr, br);
     DeleteObject(br);
   }
+
+  // 数字时钟（左上角，呼吸豁免）
+  draw_clock(dc);
 }
 
 static void draw_hud(HDC dc, int w) {
@@ -313,11 +370,11 @@ static void draw_hud(HDC dc, int w) {
   HDC mem = CreateCompatibleDC(dc);
   HBITMAP bmp = CreateCompatibleBitmap(dc, bw, bh);
   HGDIOBJ ob = SelectObject(mem, bmp);
-  HBRUSH bg = CreateSolidBrush(RGB(10, 10, 10));
+  HBRUSH bg = CreateSolidBrush(dim_color(RGB(10, 10, 10), s_frameK)); // HUD 参与呼吸（滞后方块 2s）
   RECT r = {0, 0, bw, bh};
   FillRect(mem, &r, bg);
   DeleteObject(bg);
-  HPEN pen = CreatePen(PS_SOLID, 1, RGB(70, 70, 70));
+  HPEN pen = CreatePen(PS_SOLID, 1, dim_color(RGB(70, 70, 70), s_frameK));
   HGDIOBJ op = SelectObject(mem, pen);
   SelectObject(mem, GetStockObject(NULL_BRUSH));
   Rectangle(mem, 0, 0, bw, bh);
@@ -337,11 +394,11 @@ static void draw_hud(HDC dc, int w) {
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, "Consolas");
   HGDIOBJ of = SelectObject(dc, f);
   SetBkMode(dc, TRANSPARENT);
-  SetTextColor(dc, RGB(230, 230, 230));
+  SetTextColor(dc, dim_color(RGB(230, 230, 230), s_frameK));
   int ly = by + 8;
   char buf[64];
   for (int i = 0; i < 7; i++) {
-    HBRUSH cbr = CreateSolidBrush(COLORS[i]);
+    HBRUSH cbr = CreateSolidBrush(dim_color(COLORS[i], s_frameK));
     RECT sq = {bx + 10, ly + 3, bx + 20, ly + 13};
     FillRect(dc, &sq, cbr);
     DeleteObject(cbr);
@@ -391,6 +448,7 @@ static void paint_frame(HWND hwnd, int showHud, double nowMs) {
     RECT all = {0, 0, w, h};
     FillRect(mdc, &all, black);
     DeleteObject(black);
+    s_frameK = breath_k(nowMs / 1000.0 - 2.0); // 常亮元素呼吸，滞后方块 2s
     draw_game(mdc, w, h, nowMs);
     if (showHud) draw_hud(mdc, w);
     BitBlt(wdc, 0, 0, w, h, mdc, 0, 0, SRCCOPY);
