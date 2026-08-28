@@ -144,6 +144,7 @@ static void record_stats_if_ended(void) {
 // ---- 用户配置（%APPDATA%\snake-screensaver\config.json，由 /c 设置窗口读写）----
 typedef struct {
   int cellSizePx;        // 单元格边长（px）
+  int clockScale;        // 数字时钟缩放（1~10，1=当前大小，档 10 = 10 倍）
   double baseSpeed;      // 基础速度（格/秒）
   int initialBlockCap;   // 初始同屏方块数上限
   int blockLifetime;     // 方块初始生存秒数
@@ -159,6 +160,7 @@ static char g_cfgPath[MAX_PATH];
 static void config_default(void) {
   Params p = params_default();
   g_cfg.cellSizePx = 10;
+  g_cfg.clockScale = 1;
   g_cfg.baseSpeed = p.baseSpeed;
   g_cfg.initialBlockCap = p.initialBlockCap;
   g_cfg.blockLifetime = p.blockLifetime;
@@ -219,6 +221,7 @@ static void config_load(void) {
     fclose(f);
     const char *v;
     if ((v = find_val(buf, "cellSizePx")) && atoi(v) >= 4 && atoi(v) <= 64) g_cfg.cellSizePx = atoi(v);
+    if ((v = find_val(buf, "clockScale")) && atoi(v) >= 1 && atoi(v) <= 10) g_cfg.clockScale = atoi(v);
     if ((v = find_val(buf, "baseSpeed")) && strtod(v, NULL) > 0) g_cfg.baseSpeed = strtod(v, NULL);
     if ((v = find_val(buf, "initialBlockCap")) && atoi(v) >= 1) g_cfg.initialBlockCap = atoi(v);
     if ((v = find_val(buf, "blockLifetime")) && atoi(v) >= 1) g_cfg.blockLifetime = atoi(v);
@@ -239,6 +242,7 @@ static void config_save(void) {
   if (!f) return;
   fprintf(f, "{\n");
   fprintf(f, "  \"cellSizePx\": %d,\n", g_cfg.cellSizePx);
+  fprintf(f, "  \"clockScale\": %d,\n", g_cfg.clockScale);
   fprintf(f, "  \"baseSpeed\": %g,\n", g_cfg.baseSpeed);
   fprintf(f, "  \"initialBlockCap\": %d,\n", g_cfg.initialBlockCap);
   fprintf(f, "  \"blockLifetime\": %d,\n", g_cfg.blockLifetime);
@@ -284,7 +288,8 @@ static void draw_clock(HDC dc) {
   char time[16];
   snprintf(time, sizeof time, "%02d:%02d:%02d", st.wHour, st.wMinute, st.wSecond);
   COLORREF c = COLORS[g_game.snake.color[0]]; // 与蛇头颜色一致（随吃到颜色变化）
-  const int dot = 2, gap = 1, dx = dot + gap, dy = dot + gap; // 点 2px、间距 1px
+  int s = g_cfg.clockScale; if (s < 1) s = 1; if (s > 10) s = 10; // 缩放 1~10，档 10 = 10 倍
+  const int dot = 2 * s, gap = s, dx = dot + gap, dy = dot + gap; // 点 2s px、间距 s px
   int x = 2 * g_cell, y0 = 2 * g_cell;
   HBRUSH br = CreateSolidBrush(c);
   for (char *p = time; *p; p++) {
@@ -514,6 +519,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 #define IDC_URG_F 105
 #define IDC_FREEZE 106
 #define IDC_CELL 108
+#define IDC_CLOCK_SCALE 109
 #define IDC_W1 110 // 占比 1..7 依次 +i
 
 #define CFG_ROWH 24
@@ -560,6 +566,8 @@ static void cfg_apply(HWND hwnd) {
   if (v >= 0) g_cfg.endFreezeMs = v;
   v = cfg_int(hwnd, IDC_CELL, g_cfg.cellSizePx);
   if (v >= 4 && v <= 64) g_cfg.cellSizePx = (int)v;
+  v = cfg_int(hwnd, IDC_CLOCK_SCALE, g_cfg.clockScale);
+  if (v >= 1 && v <= 10) g_cfg.clockScale = (int)v;
   int sum = 0;
   for (int i = 0; i < 7; i++) {
     v = cfg_int(hwnd, IDC_W1 + i, g_cfg.weights[i]);
@@ -591,6 +599,8 @@ static LRESULT CALLBACK CfgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       cfg_row(hwnd, IDC_URG_F, "Urgency factor", b, 16, y); y += CFG_ROWH;
       snprintf(b, sizeof b, "%g", g_cfg.endFreezeMs);
       cfg_row(hwnd, IDC_FREEZE, "End freeze (sec)", b, 16, y); y += CFG_ROWH;
+      snprintf(b, sizeof b, "%d", g_cfg.clockScale);
+      cfg_row(hwnd, IDC_CLOCK_SCALE, "Clock scale (1-10)", b, 16, y);
       // 右列：7 种占比 + 单元格
       y = 12;
       char lbl[32], val[32];
