@@ -10,6 +10,10 @@
 
 // 渲染参数（可由 /c 配置窗口写入 config.json 覆盖，见 config_load）
 static int g_cell = 10;          // 单元格边长（px）
+// 离屏双缓冲：整帧先在内存 DC 画好，再一次性 BitBlt 上屏，避免清屏/绘制过程暴露到屏幕造成黑屏闪
+static HDC s_memDc = NULL;
+static HBITMAP s_memBmp = NULL;
+static int s_memW = 0, s_memH = 0;
 
 // tcc 自带头文件较老，缺少的宏/函数在此补齐
 #ifndef GET_X_LPARAM
@@ -52,6 +56,7 @@ static int g_cols, g_rows;
 static HWND g_hwnd;
 static long g_lastX = -1, g_lastY = -1, g_moveDist = 0;
 static int g_ended = 0;
+static int g_timerMs = 16; // 逻辑/渲染定时器间隔（ms），启动时按显示器刷新率对齐（60Hz→16，120Hz→8）
 
 // ---- 跨会话统计（%APPDATA%\snake-screensaver\stats.json，与 TS 版同格式）----
 typedef struct { int maxSurvival, successCount, failCount, colorCounts[7], totalScore; } SaveStats;
@@ -245,13 +250,9 @@ static void config_save(void) {
   fclose(f);
 }
 
-// ---- 渲染 ----
-static void draw_game(HDC dc, int w, int h, double nowMs) {
+// ---- 渲染（整帧画进内存 DC，由 paint_frame 一次上屏）----
+static void draw_game(HDC dc, int w, int h) {
   Rect r = g_game.grid.operable;
-  RECT all = {0, 0, w, h};
-  HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
-  FillRect(dc, &all, black);
-  DeleteObject(black);
 
   // 围墙（可操作区域外）
   HBRUSH wall = CreateSolidBrush(WALL_COLOR);
@@ -352,6 +353,38 @@ static void draw_hud(HDC dc, int w) {
   DeleteObject(f);
 }
 
+// 复用离屏缓冲（窗口尺寸变化时重建，避免每次重绘分配全屏位图）
+static HDC ensure_memdc(HDC ref, int w, int h) {
+  if (s_memDc && s_memW == w && s_memH == h) return s_memDc;
+  if (s_memBmp) DeleteObject(s_memBmp);
+  if (s_memDc) DeleteDC(s_memDc);
+  s_memDc = CreateCompatibleDC(ref);
+  s_memBmp = CreateCompatibleBitmap(ref, w, h);
+  if (s_memDc) SelectObject(s_memDc, s_memBmp);
+  s_memW = w; s_memH = h;
+  return s_memDc;
+}
+
+// 离屏双缓冲渲染：清背景→画游戏→画 HUD 全在内存 DC 完成，最后一次性 BitBlt 上屏
+static void paint_frame(HWND hwnd, int showHud) {
+  PAINTSTRUCT ps;
+  HDC wdc = BeginPaint(hwnd, &ps);
+  RECT rc;
+  GetClientRect(hwnd, &rc);
+  int w = rc.right, h = rc.bottom;
+  if (w > 0 && h > 0) {
+    HDC mdc = ensure_memdc(wdc, w, h);
+    HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
+    RECT all = {0, 0, w, h};
+    FillRect(mdc, &all, black);
+    DeleteObject(black);
+    draw_game(mdc, w, h);
+    if (showHud) draw_hud(mdc, w);
+    BitBlt(wdc, 0, 0, w, h, mdc, 0, 0, SRCCOPY);
+  }
+  EndPaint(hwnd, &ps);
+}
+
 // ---- 主窗口（屏保/调试）----
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
@@ -372,24 +405,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MBUTTONDOWN:
       if (g_saverMode) PostMessage(hwnd, WM_CLOSE, 0, 0);
       return 0;
+    case WM_ERASEBKGND:
+      return 1; // 禁止系统用背景刷先擦黑，避免每次重绘前出现黑屏闪（整帧由离屏缓冲完整覆盖）
     case WM_TIMER:
-      game_update(&g_game, 25.0);
+      game_update(&g_game, g_timerMs);
       record_stats_if_ended();
       InvalidateRect(hwnd, NULL, FALSE);
       return 0;
-    case WM_PAINT: {
-      PAINTSTRUCT ps;
-      HDC dc = BeginPaint(hwnd, &ps);
-      RECT rc;
-      GetClientRect(hwnd, &rc);
-      draw_game(dc, rc.right, rc.bottom, NOW_MS);
-      draw_hud(dc, rc.right);
-      EndPaint(hwnd, &ps);
+    case WM_PAINT:
+      paint_frame(hwnd, 1);
       return 0;
-    }
     case WM_DESTROY:
       DBG("[wnd] WM_DESTROY\n");
       KillTimer(hwnd, 1);
+      if (s_memBmp) DeleteObject(s_memBmp);
+      if (s_memDc) DeleteDC(s_memDc);
+      s_memBmp = NULL; s_memDc = NULL;
       if (g_saverMode) {
         ShowCursor(TRUE);
         SystemParametersInfo(SPI_SETSCREENSAVERRUNNING, FALSE, NULL, 0);
@@ -520,15 +551,11 @@ static LRESULT CALLBACK CfgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 // ---- 预览窗口（/p，MVP 静态帧）----
 static LRESULT CALLBACK PrevProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
-    case WM_PAINT: {
-      PAINTSTRUCT ps;
-      HDC dc = BeginPaint(hwnd, &ps);
-      RECT rc;
-      GetClientRect(hwnd, &rc);
-      draw_game(dc, rc.right, rc.bottom, 0);
-      EndPaint(hwnd, &ps);
+    case WM_ERASEBKGND:
+      return 1;
+    case WM_PAINT:
+      paint_frame(hwnd, 0);
       return 0;
-    }
     case WM_DESTROY:
       PostQuitMessage(0);
       return 0;
@@ -585,8 +612,14 @@ static void run_screensaver(void) {
     SystemParametersInfo(SPI_SETSCREENSAVERRUNNING, TRUE, NULL, 0);
     ShowCursor(FALSE);
   }
-  SetTimer(g_hwnd, 1, 25, NULL);
-  DBG("[main] entering loop\n");
+  // 定时器间隔对齐显示器刷新率（对应 requestAnimationFrame 对齐刷新）
+  DEVMODEA dm = {0};
+  dm.dmSize = sizeof dm;
+  int hz = 60;
+  if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency >= 30) hz = dm.dmDisplayFrequency;
+  g_timerMs = 1000 / hz;
+  SetTimer(g_hwnd, 1, g_timerMs, NULL);
+  DBG("[main] entering loop (timer=%dms)\n", g_timerMs);
   loop(g_hwnd);
   DBG("[main] loop exited\n");
 }

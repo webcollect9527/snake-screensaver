@@ -11,7 +11,7 @@
 | 项 | 选型 | 说明 |
 |---|---|---|
 | 框架 | 原生 Win32 + C（WinAPI/GDI） | Windows 屏保的标准形态：单个自包含 `.scr`、原生处理 /s /c /p。此前 Electron 便携版与屏保协议不兼容（NSIS 桩把 `/c`/`/s` 当安装器开关，报 "error launching installer"），且体积下限 ~80MB 无法压到 10MB 内 |
-| 渲染 | GDI（FillRect / TextOut），单元格 10px | 屏保只画实心方块与文本，无 GPU 复杂度，CPU 占用极低 |
+| 渲染 | GDI（FillRect / TextOut），单元格 10px，**离屏双缓冲** | 屏保只画实心方块与文本，无 GPU 复杂度，CPU 占用极低；整帧先画到内存 DC 再一次 BitBlt 上屏，杜绝清屏/绘制过程暴露造成的黑屏闪 |
 | 状态/统计持久化 | JSON 文件（`%APPDATA%\snake-screensaver\stats.json`） | 记录最大生存时间、成功/失败次数等跨会话数据，无需数据库 |
 | 打包 | TinyCC 编译 `screensaver.c + game.c` 直接输出 `SnakeScreensaver.scr`（GUI 子系统） | 产物约 30KB、无运行时依赖；见第 3 节 |
 
@@ -139,6 +139,7 @@ src/
 6. **性能**：网格最大约 192×108（1080p/10px），BFS 与 flood fill 每步开销可忽略；每 tick 只在目标方块变化或每 N 步重算路径即可。
 7. **屏保退出**：正式模式下监听 `mouse-move`（累计位移阈值）、`key-down`、`mouse-down` → `app.quit()`。
 8. **多显示器**：MVP 只覆盖主屏，全屏窗口 `x:0,y:0`。
+9. **无闪烁渲染**：整帧离屏双缓冲（`paint_frame`：清背景→画游戏→画 HUD 全在复用内存 DC，最后一次 `BitBlt`）；`WM_ERASEBKGND` 返回 TRUE 禁止系统用背景刷先擦黑；逻辑/渲染定时器间隔按 `EnumDisplaySettings` 刷新率对齐（60Hz→16ms）。结束定格→重开切换因整帧覆盖不出现黑屏闪。
 
 ## 7. 数据持久化
 
